@@ -8,7 +8,13 @@ import { usePluginsStore } from "../stores/plugins";
 
 const store = usePluginsStore();
 provide(CTX_KEY, store.activeCtx);
-onMounted(() => store.discover());
+onMounted(async () => {
+    await store.discover();
+    // 扫到插件后自动激活第一个，避免停在默认的「无插件 / 未激活」空态
+    if (!store.activeId && store.plugins.length) {
+        await store.activate(store.plugins[0].manifest.id);
+    }
+});
 
 const options = computed(() => [
     { label: "无插件", value: "" },
