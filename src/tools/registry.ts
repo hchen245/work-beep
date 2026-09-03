@@ -113,7 +113,16 @@ export async function execute(name: string, argsJson: string): Promise<string> {
     if (invalid) return `参数校验失败: ${invalid}`;
 
     try {
-        return await entry.def.run(args);
+        const result = await entry.def.run(args);
+        try {
+            const data = JSON.parse(result) as { ok?: boolean; validated?: boolean };
+            if (data && typeof data === "object" && (data.ok === false || data.validated === false)) {
+                return `验收未通过: ${result}`;
+            }
+        } catch {
+            // 非 JSON 结果原样回灌
+        }
+        return result;
     } catch (e) {
         return `工具执行失败: ${e instanceof Error ? e.message : String(e)}`;
     }

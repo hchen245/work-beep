@@ -10,10 +10,10 @@ pub fn call(port: u16, cmd: &str, params: &serde_json::Value) -> Result<serde_js
     let mut stream =
         TcpStream::connect(("127.0.0.1", port)).map_err(|e| format!("连接桥失败: {e}"))?;
     stream
-        .set_read_timeout(Some(Duration::from_secs(30)))
+        .set_read_timeout(Some(Duration::from_secs(120)))
         .ok();
     stream
-        .set_write_timeout(Some(Duration::from_secs(5)))
+        .set_write_timeout(Some(Duration::from_secs(120)))
         .ok();
 
     let req = serde_json::json!({"cmd": cmd, "params": params});
