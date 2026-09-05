@@ -163,7 +163,7 @@ impl Drop for ProcTable {
 
 /// 相对路径的锚定基准：开发期 = 项目根（src-tauri 的上一级），发布版 = exe 所在目录。
 /// 插件资源正式走"插件目录 + resolveAsset"是阶段 C 的事，这里先保住两段都能跑。
-fn base_dir() -> PathBuf {
+pub(crate) fn base_dir() -> PathBuf {
     if cfg!(debug_assertions) {
         PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .parent()

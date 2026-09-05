@@ -32,6 +32,24 @@ function makeCtx(p: LoadedPlugin): PluginContext {
         syncRect: (pid, rect) => invoke("proc_move", { pid, ...rect }),
         call: (port, cmd, params) => invoke("bridge_call", { port, cmd, params }),
         resolveAsset: (rel) => `${p.dir}\\assets\\${rel.replace(/\//g, "\\")}`,
+        exists: (path) => invoke<boolean>("file_exists", { path }),
+        async download(url, dest, onProgress) {
+            const unlisten = await listen<{ dest: string; done: number; total: number }>(
+                "http-download-progress",
+                (ev) => {
+                    if (ev.payload.dest === dest) {
+                        onProgress?.(ev.payload.done, ev.payload.total);
+                    }
+                },
+            );
+            try {
+                await invoke("http_download", { url, dest });
+            } finally {
+                unlisten();
+            }
+        },
+        extractZip: (zipPath, destDir) => invoke("zip_extract", { zipPath, destDir }),
+        removePath: (path) => invoke("remove_path", { path }),
         rectOf,
         watchRect(el, cb) {
             const emit = () => {
@@ -125,6 +143,10 @@ export const usePluginsStore = defineStore("plugins", () => {
         syncRect: (...a) => mustActiveCtx().syncRect(...a),
         call: (...a) => mustActiveCtx().call(...a),
         resolveAsset: (...a) => mustActiveCtx().resolveAsset(...a),
+        exists: (...a) => mustActiveCtx().exists(...a),
+        download: (...a) => mustActiveCtx().download(...a),
+        extractZip: (...a) => mustActiveCtx().extractZip(...a),
+        removePath: (...a) => mustActiveCtx().removePath(...a),
         rectOf: (...a) => mustActiveCtx().rectOf(...a),
         watchRect: (...a) => mustActiveCtx().watchRect(...a),
     };

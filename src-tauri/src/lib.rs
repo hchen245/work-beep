@@ -1,6 +1,7 @@
 // 应用入口：窗口壳 + 通用桌面能力（子进程拉起/窗口嵌入/桥转发，见 procs.rs）。
 // 不含任何具体插件（Blender 等）的业务逻辑。
 mod bridge;
+mod fetch;
 mod procs;
 
 use procs::ProcTable;
@@ -27,7 +28,11 @@ pub fn run() {
             procs::bridge_call,
             procs::plugins_dir,
             procs::set_workspace,
-            procs::root_env
+            procs::root_env,
+            fetch::file_exists,
+            fetch::http_download,
+            fetch::zip_extract,
+            fetch::remove_path
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

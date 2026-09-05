@@ -8,7 +8,12 @@ import { usePluginsStore } from "../stores/plugins";
 
 const store = usePluginsStore();
 provide(CTX_KEY, store.activeCtx);
-onMounted(() => store.discover());
+onMounted(async () => {
+    await store.discover();
+    if (!store.activeId && store.plugins.length > 0) {
+        await store.activate(store.plugins[0].manifest.id);
+    }
+});
 
 const options = computed(() => [
     { label: "无插件", value: "" },
