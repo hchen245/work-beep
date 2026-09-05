@@ -6,6 +6,7 @@
 import { exists, readDir, readTextFile, writeTextFile } from "@tauri-apps/plugin-fs";
 import { useWorkspaceStore } from "../stores/workspace";
 import type { ToolDef } from "./registry";
+import { TOOL_CHAINS, listChainCatalog, setToolChain, type ToolChain } from "./registry";
 
 const READ_MAX_LINES = 400;
 const LS_MAX_ENTRIES = 200;
@@ -49,6 +50,39 @@ function mustResolve(rel: string | undefined): string | null {
 const NO_WORKSPACE = "尚未选择工作区：请让用户先在对话面板底部选择工作区目录";
 
 export const builtinTools: ToolDef[] = [
+    {
+        name: "get_toolchain",
+        description:
+            "获取一条工具链。新任务必须先调它。可选 scene/object/mesh/modifier/material/light/camera/view/render/files。改物体前先 scene。出三视图用 render。",
+        parameters: {
+            type: "object",
+            properties: {
+                chain: {
+                    type: "string",
+                    description: "要激活的工具链",
+                    enum: [...TOOL_CHAINS],
+                },
+            },
+            required: ["chain"],
+            additionalProperties: false,
+        },
+        async run(args) {
+            const chain = String(args.chain ?? "");
+            if (!setToolChain(chain)) {
+                return JSON.stringify({
+                    ok: false,
+                    error: `未知工具链: ${chain}`,
+                    available: [...TOOL_CHAINS],
+                });
+            }
+            return JSON.stringify({
+                ok: true,
+                chain,
+                pinned: ["get_toolchain", "blender.scene_list_objects"],
+                tools: listChainCatalog(chain as ToolChain),
+            });
+        },
+    },
     {
         name: "read",
         description: "读工作区内文件（限前 400 行）",

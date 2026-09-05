@@ -6,7 +6,7 @@ import { invoke } from "@tauri-apps/api/core";
 import OpenAI from "openai";
 import { useChatStore } from "../stores/chat";
 import type { ChatMessage } from "../stores/chat";
-import { execute, getOpenAITools, realName } from "../tools/registry";
+import { execute, getOpenAITools, realName, resetToolChain } from "../tools/registry";
 
 // OpenAI 兼容接口，配置见 .env.example
 // VITE_LLM_API_URL 填服务商文档给的完整 baseURL（一般已含 /v1），代码原样透传
@@ -62,9 +62,12 @@ function clientOf(cfg: LlmConfig): OpenAI {
 
 // 系统提示：助手人设 + 工具纪律 + 排版要求，不进 UI 消息列表
 const SYSTEM_PROMPT = [
-    "你是 blenderBeeper 的助手。用户用自然语言描述需求，你通过调用提供的工具来完成：",
-    "文件工具（read/write/edit/ls/grep）操作当前工作区，带命名空间前缀的工具操作已激活的外部应用。",
-    "操作完成后用简短中文说明结果。",
+    "你是 blenderBeeper 的助手。用户用自然语言描述需求，你通过调用提供的工具来完成。",
+    "工具已拆成多条链。每条新用户任务必须先调用 get_toolchain 获取当前需要的那一条，不要沿用上一任务的链。",
+    "链：scene（查/清场景）、object（增删移物体）、mesh（改网格）、modifier（修改器）、material（材质）、light（灯）、camera（相机）、view（视口）、render（出图）、files（工作区文件）。",
+    "改已有物体前先 blender.scene_list_objects。链里没有的工具不许用别的命令冒充。",
+    "多部件模型保持独立 object，不要为了出图做 Boolean。出整体三视图用 render 链的 blender.render_scene_views。",
+    "文件工具在 files 链。操作完成后用简短中文说明结果。",
     "回答一律使用 Markdown 排版，数学公式用 LaTeX（行内 $...$，独立公式 $$...$$），",
     "直接输出 Markdown 正文，不要用代码块包裹整篇回答。",
 ].join("");
@@ -74,7 +77,7 @@ const apiHistory: OpenAI.ChatCompletionMessageParam[] = [
     { role: "system", content: SYSTEM_PROMPT },
 ];
 
-const MAX_TOOL_ROUNDS = 3;
+const MAX_TOOL_ROUNDS = 50;
 
 // 当前请求的取消控制器，停止按钮（■）触发
 let abortCtrl: AbortController | null = null;
@@ -99,6 +102,8 @@ export async function send() {
         return;
     }
     const llm = clientOf(cfg);
+    apiHistory[0] = { role: "system", content: SYSTEM_PROMPT };
+    resetToolChain();
 
     chat.messages.push({ role: "user", content: text });
     apiHistory.push({ role: "user", content: text });
