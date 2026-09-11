@@ -25,6 +25,8 @@ pub fn run() {
             procs::proc_embed,
             procs::proc_move,
             procs::proc_kill,
+            procs::proc_capture,
+            procs::proc_stream,
             procs::bridge_call,
             procs::plugins_dir,
             procs::set_workspace,
@@ -32,7 +34,9 @@ pub fn run() {
             fetch::file_exists,
             fetch::http_download,
             fetch::zip_extract,
-            fetch::remove_path
+            fetch::remove_path,
+            fetch::read_text_file,
+            fetch::write_text_file,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

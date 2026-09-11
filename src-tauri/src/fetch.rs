@@ -27,7 +27,7 @@ fn plugins_root() -> PathBuf {
     base_dir().join("plugins")
 }
 
-fn ensure_under_plugins(path: &Path) -> Result<PathBuf, String> {
+pub(crate) fn ensure_under_plugins(path: &Path) -> Result<PathBuf, String> {
     let plugins = plugins_root();
     fs::create_dir_all(&plugins).map_err(|e| format!("创建插件目录失败: {e}"))?;
     let plugins_can = plugins
@@ -170,4 +170,22 @@ pub fn zip_extract(zip_path: String, dest_dir: String) -> Result<(), String> {
         .extract(&dest_abs)
         .map_err(|e| format!("解压失败: {e}"))?;
     Ok(())
+}
+
+#[tauri::command]
+pub fn read_text_file(path: String) -> Result<String, String> {
+    let abs = ensure_under_plugins(Path::new(&path))?;
+    if !abs.is_file() {
+        return Err("文件不存在".into());
+    }
+    fs::read_to_string(&abs).map_err(|e| format!("读文件失败: {e}"))
+}
+
+#[tauri::command]
+pub fn write_text_file(path: String, contents: String) -> Result<(), String> {
+    let abs = ensure_under_plugins(Path::new(&path))?;
+    if let Some(parent) = abs.parent() {
+        fs::create_dir_all(parent).map_err(|e| format!("创建目录失败: {e}"))?;
+    }
+    fs::write(&abs, contents).map_err(|e| format!("写文件失败: {e}"))
 }

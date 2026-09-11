@@ -3,13 +3,19 @@
 //! 全部与 Blender 无关——可执行路径与启动参数由前端（插件）传入。
 
 use std::collections::HashMap;
+use std::io::{BufRead, BufReader};
 use std::net::{TcpListener, TcpStream};
-use std::path::PathBuf;
-use std::process::{Child, Command};
+use std::path::{Path, PathBuf};
+use std::process::{Child, Command, Stdio};
 use std::sync::Mutex;
+use std::thread;
 use std::time::{Duration, Instant};
 
+use serde::Serialize;
+use tauri::{AppHandle, Emitter};
+
 use crate::bridge;
+use crate::fetch;
 
 /// Windows 窗口嵌入原语：SetParent 真子窗口 + WebView 挖洞
 /// （WebView2 airspace 问题会盖住一切子窗口，故从 WebView 上剪洞让子窗口露出；仅 Windows）
@@ -245,6 +251,157 @@ pub fn proc_start(
         wait_for_port(p, Duration::from_secs(60))?;
     }
     Ok(ProcInfo { pid, port })
+}
+
+#[derive(serde::Serialize)]
+pub struct CaptureResult {
+    code: i32,
+    stdout: String,
+    stderr: String,
+}
+
+/// 短生命周期子进程：捕获输出后退出。用于 blender --version 等探测，不入 ProcTable。
+#[tauri::command]
+pub fn proc_capture(
+    executable: String,
+    args: Vec<String>,
+    timeout_ms: Option<u64>,
+) -> Result<CaptureResult, String> {
+    use std::sync::mpsc;
+    use std::thread;
+
+    let base = base_dir();
+    let base_str = base.to_string_lossy().to_string();
+    let subst = |s: &str| s.replace("{base}", &base_str);
+    let exe = PathBuf::from(subst(&executable));
+    let exe = if exe.is_absolute() { exe } else { base.join(exe) };
+    if !exe.exists() {
+        return Err(format!("找不到可执行文件: {}", exe.display()));
+    }
+    let final_args: Vec<String> = args.iter().map(|a| subst(a)).collect();
+    let timeout = Duration::from_millis(timeout_ms.unwrap_or(15_000));
+
+    let (tx, rx) = mpsc::channel();
+    let exe_clone = exe.clone();
+    thread::spawn(move || {
+        let output = Command::new(&exe_clone).args(&final_args).output();
+        let _ = tx.send(output);
+    });
+
+    match rx.recv_timeout(timeout) {
+        Ok(Ok(output)) => Ok(CaptureResult {
+            code: output.status.code().unwrap_or(-1),
+            stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
+            stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+        }),
+        Ok(Err(e)) => Err(format!("启动进程失败: {e}")),
+        Err(_) => Err(format!(
+            "进程超时（{}ms）: {}",
+            timeout.as_millis(),
+            exe.display()
+        )),
+    }
+}
+
+#[derive(Clone, Serialize)]
+struct StreamLine {
+    session: String,
+    stream: String,
+    line: String,
+}
+
+/// 仅允许 plugins/ 下的 fetch_blender.exe；逐行 emit stdout/stderr，返回 exit code。
+#[tauri::command]
+pub async fn proc_stream(
+    app: AppHandle,
+    session: String,
+    executable: String,
+    args: Vec<String>,
+    cwd: Option<String>,
+) -> Result<i32, String> {
+    let exe = fetch::ensure_under_plugins(Path::new(&executable))?;
+    let name = exe
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("");
+    if !name.eq_ignore_ascii_case("fetch_blender.exe") && name != "fetch_blender" {
+        return Err("只允许运行插件自带的 fetch_blender.exe".into());
+    }
+    if !exe.is_file() {
+        return Err(format!("找不到 fetch_blender.exe: {}", exe.display()));
+    }
+
+    let cwd_path = if let Some(c) = cwd {
+        Some(fetch::ensure_under_plugins(Path::new(&c))?)
+    } else {
+        None
+    };
+
+    let session_out = session.clone();
+    let session_err = session.clone();
+    let app_out = app.clone();
+    let app_err = app.clone();
+    let exe_run = exe.clone();
+    let args_run = args.clone();
+
+    tauri::async_runtime::spawn_blocking(move || {
+        let mut cmd = Command::new(&exe_run);
+        cmd.args(&args_run)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        if let Some(ref c) = cwd_path {
+            cmd.current_dir(c);
+        }
+        let mut child = cmd.spawn().map_err(|e| format!("启动进程失败: {e}"))?;
+
+        let stdout = child.stdout.take().ok_or("无法捕获 stdout")?;
+        let stderr = child.stderr.take().ok_or("无法捕获 stderr")?;
+
+        let out_handle = thread::spawn(move || {
+            let reader = BufReader::new(stdout);
+            for line in reader.lines() {
+                match line {
+                    Ok(l) => {
+                        let _ = app_out.emit(
+                            "proc-stream-line",
+                            StreamLine {
+                                session: session_out.clone(),
+                                stream: "stdout".into(),
+                                line: l,
+                            },
+                        );
+                    }
+                    Err(_) => break,
+                }
+            }
+        });
+        let err_handle = thread::spawn(move || {
+            let reader = BufReader::new(stderr);
+            for line in reader.lines() {
+                match line {
+                    Ok(l) => {
+                        let _ = app_err.emit(
+                            "proc-stream-line",
+                            StreamLine {
+                                session: session_err.clone(),
+                                stream: "stderr".into(),
+                                line: l,
+                            },
+                        );
+                    }
+                    Err(_) => break,
+                }
+            }
+        });
+
+        let status = child.wait().map_err(|e| format!("等待进程失败: {e}"))?;
+        let _ = out_handle.join();
+        let _ = err_handle.join();
+        Ok(status.code().unwrap_or(-1))
+    })
+    .await
+    .map_err(|e| format!("进程任务失败: {e}"))?
 }
 
 /// 把 pid 对应进程的主窗口嵌入本应用指定区域（物理像素，本应用客户区坐标系）
