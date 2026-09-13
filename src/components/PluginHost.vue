@@ -49,6 +49,8 @@ const options = computed(() => [
     display: grid;
     grid-template-rows: auto 1fr;
     height: 100%;
+    min-width: 0;
+    max-width: 100%;
     min-height: 0;
 }
 
@@ -67,6 +69,8 @@ const options = computed(() => [
 
 .view-slot {
     position: relative;
+    min-width: 0;
+    max-width: 100%;
     min-height: 0;
 }
 
