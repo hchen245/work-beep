@@ -5,8 +5,7 @@
 // 源头截断原则：read 限行、ls 限条、grep 限文件数与匹配数。
 import { exists, readDir, readTextFile, writeTextFile } from "@tauri-apps/plugin-fs";
 import { useWorkspaceStore } from "../stores/workspace";
-import type { ToolDef } from "./registry";
-import { TOOL_CHAINS, listChainCatalog, setToolChain, type ToolChain } from "./registry";
+import { TOOL_CHAINS, listChainCatalog, setToolChain, type ToolChain, type ToolDef } from "./registry";
 
 const READ_MAX_LINES = 400;
 const LS_MAX_ENTRIES = 200;

@@ -80,7 +80,7 @@ export function setToolChain(chain: string): chain is ToolChain {
 export function chainOf(name: string): ToolChain | null {
     if (name === META_TOOL) return null;
     if (!name.includes(".")) return "files";
-    const rest = name.includes(".") ? name.slice(name.indexOf(".") + 1) : name;
+    const rest = name.slice(name.indexOf(".") + 1);
     const head = rest.split("_")[0];
     if (CHAIN_SET.has(head)) return head as ToolChain;
     return null;

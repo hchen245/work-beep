@@ -62,15 +62,21 @@ function clientOf(cfg: LlmConfig): OpenAI {
 
 // 系统提示：助手人设 + 工具纪律 + 排版要求，不进 UI 消息列表
 const SYSTEM_PROMPT = [
-    "你是 blenderBeeper 的助手。用户用自然语言描述需求，你通过调用提供的工具来完成。",
-    "工具已拆成多条链。每条新用户任务必须先调用 get_toolchain 获取当前需要的那一条，不要沿用上一任务的链。",
-    "链：scene（查/清场景）、object（增删移物体）、mesh（改网格）、modifier（修改器）、material（材质）、light（灯）、camera（相机）、view（视口）、render（出图）、files（工作区文件）。",
-    "改已有物体前先 blender.scene_list_objects。链里没有的工具不许用别的命令冒充。",
-    "多部件模型保持独立 object，不要为了出图做 Boolean。出整体三视图用 render 链的 blender.render_scene_views。",
-    "文件工具在 files 链。操作完成后用简短中文说明结果。",
-    "回答一律使用 Markdown 排版，数学公式用 LaTeX（行内 $...$，独立公式 $$...$$），",
-    "直接输出 Markdown 正文，不要用代码块包裹整篇回答。",
-].join("");
+    "你是 blenderBeeper 的 Blender Agent。",
+    "",
+    "你必须遵守以下规则：",
+    "1. 当用户要求创建、删除、移动、旋转、缩放或修改 Blender 场景中的对象时，必须实际调用提供的 Blender 工具完成操作。",
+    "2. 不要只向用户解释如何在 Blender 中操作，也不要让用户自己手动完成本可由工具完成的操作。",
+    "3. 只能调用当前提供的工具，不得虚构不存在的工具或声称执行了实际上没有执行的操作。",
+    "4. 工具已拆成多条链。每条新用户任务必须先调用 get_toolchain 获取当前需要的那一条，不要沿用上一任务的链。",
+    "5. 链：scene（查/清场景）、object（增删移物体）、mesh（改网格）、modifier（修改器）、material（材质）、light（灯）、camera（相机）、view（视口）、render（出图）、files（工作区文件）。",
+    "6. 改已有物体前先 blender.scene_list_objects。链里没有的工具不许用别的命令冒充。",
+    "7. 多部件模型保持独立 object，不要为了出图做 Boolean。出整体三视图用 render 链的 blender.render_scene_views。",
+    "8. 文件工具在 files 链。如果完成任务需要多个操作，应继续调用必要的工具，直到任务完成或达到工具调用上限。",
+    "9. 如果工具返回错误，根据错误信息修正操作；无法完成时明确说明失败原因。",
+    "10. 只有在工具成功执行后，才能告诉用户相应操作已经完成。",
+    "11. 完成后用简短中文总结实际完成的操作。",
+].join("\n");
 
 // API 侧会话历史（含 system / assistant 的 tool_calls / 工具结果），与 UI 消息分开维护
 const apiHistory: OpenAI.ChatCompletionMessageParam[] = [
@@ -81,6 +87,51 @@ const MAX_TOOL_ROUNDS = 50;
 
 // 当前请求的取消控制器，停止按钮（■）触发
 let abortCtrl: AbortController | null = null;
+
+// llama.cpp / vLLM 用 chat_template_kwargs.enable_thinking 控制思考。
+// OpenAI 官方与 Azure OpenAI 不认该字段，带上会 400 Unknown parameter。
+// 其它兼容网关若同样拒绝，本会话后续请求不再带上。
+let skipChatTemplateKwargs = false;
+
+// gpt-6 等推理模型在 /v1/chat/completions 里默认带 reasoning，
+// 与 function tools 冲突，必须显式 reasoning_effort=none。命中过该 400 的模型记在这里。
+const reasoningNoneModels = new Set<string>();
+
+function isOfficialOpenAI(url: string | undefined): boolean {
+    if (!url) return false;
+    try {
+        const host = new URL(url).hostname.toLowerCase();
+        return host === "api.openai.com" || host.endsWith(".openai.azure.com");
+    } catch {
+        return false;
+    }
+}
+
+function supportsChatTemplateKwargs(url: string | undefined): boolean {
+    if (skipChatTemplateKwargs || !url || isOfficialOpenAI(url)) return false;
+    try {
+        new URL(url);
+        return true;
+    } catch {
+        return false;
+    }
+}
+
+function modelNeedsReasoningNone(model: string): boolean {
+    if (reasoningNoneModels.has(model)) return true;
+    // o 系列、gpt-5 / gpt-6 默认会推理；chat completions + 工具时必须关掉
+    return /^(o\d|gpt-5|gpt-6)/i.test(model);
+}
+
+function rejectedChatTemplateKwargs(err: unknown): boolean {
+    const msg = err instanceof Error ? err.message : String(err);
+    return /unknown parameter/i.test(msg) && /chat_template_kwargs/.test(msg);
+}
+
+function rejectedToolsWithReasoning(err: unknown): boolean {
+    const msg = err instanceof Error ? err.message : String(err);
+    return /function tools with reasoning_effort/i.test(msg);
+}
 
 export function stop() {
     abortCtrl?.abort();
@@ -120,18 +171,55 @@ export async function send() {
     try {
         // 工具调用循环：模型返回 tool_calls 就执行工具、把结果回灌进历史，再开下一轮
         for (let round = 0; ; round++) {
-            // chat_template_kwargs 不在 SDK 类型里，先用变量装（避开字面量超额属性检查）再传入
+            // chat_template_kwargs 不在 SDK 类型里，先用变量装（避开字面量超额属性检查）再传入。
+            // 官方 OpenAI 不带该字段。gpt-5 / gpt-6 带函数工具时必须 reasoning_effort=none。
+            const tools = getOpenAITools();
+            const extra = supportsChatTemplateKwargs(cfg.url)
+                ? { chat_template_kwargs: { enable_thinking: chat.thinking === "on" } }
+                : isOfficialOpenAI(cfg.url) && tools.length > 0 && modelNeedsReasoningNone(cfg.model)
+                  ? { reasoning_effort: "none" as const }
+                  : {};
             const body = {
                 model: cfg.model,
                 messages: apiHistory,
                 stream: true as const,
-                tools: getOpenAITools(),
-                chat_template_kwargs: { enable_thinking: chat.thinking === "on" },
+                tools,
+                ...extra,
             };
-            const stream = await llm.chat.completions.create(
-                body,
-                { signal: abortCtrl.signal },
-            );
+            let stream;
+            try {
+                stream = await llm.chat.completions.create(
+                    body,
+                    { signal: abortCtrl.signal },
+                );
+            } catch (err) {
+                if ("chat_template_kwargs" in body && rejectedChatTemplateKwargs(err)) {
+                    skipChatTemplateKwargs = true;
+                    stream = await llm.chat.completions.create(
+                        {
+                            model: body.model,
+                            messages: body.messages,
+                            stream: body.stream,
+                            tools: body.tools,
+                        },
+                        { signal: abortCtrl.signal },
+                    );
+                } else if (rejectedToolsWithReasoning(err) && body.reasoning_effort !== "none") {
+                    reasoningNoneModels.add(cfg.model);
+                    stream = await llm.chat.completions.create(
+                        {
+                            model: body.model,
+                            messages: body.messages,
+                            stream: body.stream,
+                            tools: body.tools,
+                            reasoning_effort: "none",
+                        },
+                        { signal: abortCtrl.signal },
+                    );
+                } else {
+                    throw err;
+                }
+            }
 
             // 流式 tool_calls 按 index 分片累积
             const toolCalls = new Map<number, { id: string; name: string; arguments: string }>();
