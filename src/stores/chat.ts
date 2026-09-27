@@ -18,7 +18,8 @@ export const useChatStore = defineStore("chat", () => {
     const messages = ref<ChatMessage[]>([]);
     const input = ref("");
     const sending = ref(false);
-    // 思考开关：on/off，agent 循环经 chat_template_kwargs 透传
+    // 思考开关：on/off。llama.cpp / vLLM 经 chat_template_kwargs 透传。
+    // OpenAI 的 gpt-5 / gpt-6 带工具时固定 reasoning_effort=none，开关不改变请求。
     const thinking = ref("on");
     return { messages, input, sending, thinking };
 });
