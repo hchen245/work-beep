@@ -40,6 +40,64 @@ export function unregisterPlugin(pluginId: string) {
     }
 }
 
+/** 模型拆分后的工具链。get_toolchain 本身不属于任何链。 */
+export const TOOL_CHAINS = [
+    "scene",
+    "object",
+    "mesh",
+    "modifier",
+    "material",
+    "light",
+    "camera",
+    "view",
+    "render",
+    "files",
+] as const;
+
+export type ToolChain = (typeof TOOL_CHAINS)[number];
+
+const CHAIN_SET = new Set<string>(TOOL_CHAINS);
+const META_TOOL = "get_toolchain";
+const PINNED = new Set([META_TOOL, "blender.scene_list_objects"]);
+
+let activeChain: ToolChain | null = null;
+
+export function resetToolChain() {
+    activeChain = null;
+}
+
+export function getActiveChain(): ToolChain | null {
+    return activeChain;
+}
+
+export function setToolChain(chain: string): chain is ToolChain {
+    if (!CHAIN_SET.has(chain)) return false;
+    activeChain = chain as ToolChain;
+    console.log("[toolchain] 激活", activeChain);
+    return true;
+}
+
+export function chainOf(name: string): ToolChain | null {
+    if (name === META_TOOL) return null;
+    if (!name.includes(".")) return "files";
+    const rest = name.slice(name.indexOf(".") + 1);
+    const head = rest.split("_")[0];
+    if (CHAIN_SET.has(head)) return head as ToolChain;
+    return null;
+}
+
+export function listChainCatalog(chain: ToolChain): { name: string; description: string }[] {
+    return [...table.values()]
+        .filter(({ def }) => chainOf(def.name) === chain)
+        .map(({ def }) => ({ name: def.name, description: def.description }));
+}
+
+function isVisible(name: string): boolean {
+    if (PINNED.has(name)) return true;
+    if (!activeChain) return false;
+    return chainOf(name) === activeChain;
+}
+
 // OpenAI function name 只允许 a-zA-Z0-9_-（服务端 400 硬校验），而插件工具名带 "." 前缀。
 // 这里是 API 边界上的纯编码层：发 schema 时把 "." 改写为 "_"（blender.view_front →
 // blender_view_front，保持函数名观感自然），执行 tool_call 时按映射表找回真名。
@@ -57,7 +115,7 @@ export function realName(name: string): string {
 
 export function getOpenAITools(): OpenAI.ChatCompletionTool[] {
     apiNames = new Map();
-    return [...table.values()].map(({ def }) => {
+    return [...table.values()].filter(({ def }) => isVisible(def.name)).map(({ def }) => {
         const name = toApiName(def.name);
         // 编码后撞名属于配置错误（如插件 id 含 "." 的场景），显式报出而不是静默错路由
         const prev = apiNames.get(name);

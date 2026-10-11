@@ -19,8 +19,9 @@ const chat = useChatStore();
 const { messages, input, sending, thinking } = storeToRefs(chat);
 const ws = useWorkspaceStore();
 
-// 思考开关：通过 chat_template_kwargs 透传（llama.cpp / vLLM 均支持的扩展字段，
-// OpenAI 标准里没有；不支持该字段的服务商可能会报 400，关掉思考也一样会带）
+// 思考开关：llama.cpp / vLLM 经 chat_template_kwargs.enable_thinking 透传。
+// OpenAI 官方不认该字段。gpt-5 / gpt-6 在 chat completions 里带函数工具时
+// 必须 reasoning_effort=none，否则 400，此时开关不改变请求。
 const THINKING_OPTIONS = [
     { label: "思考·开", value: "on" },
     { label: "思考·关", value: "off" },
