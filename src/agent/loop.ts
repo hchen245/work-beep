@@ -8,6 +8,14 @@ import OpenAI from "openai";
 import { useChatStore } from "../stores/chat";
 import type { ChatMessage } from "../stores/chat";
 import { execute, getOpenAITools, realName, resetToolChain } from "../tools/registry";
+import {
+    SEMANTIC_INSPECT_TOOL,
+    buildJudgePrompt,
+    combineVerdict,
+    parseHarnessJson,
+    parseSemanticInspect,
+    type SemanticSnapshot,
+} from "./semantic";
 
 // OpenAI 兼容接口，配置见 .env.example
 // VITE_LLM_API_URL 填服务商文档给的完整 baseURL（一般已含 /v1），代码原样透传
@@ -78,6 +86,9 @@ const SYSTEM_PROMPT = [
     "9. 如果工具返回错误，根据错误信息修正操作；无法完成时明确说明失败原因。",
     "10. 只有在工具成功执行后，才能告诉用户相应操作已经完成。",
     "11. 完成后用简短中文总结实际完成的操作。",
+    "12. 多部件模型先规划部件和语义分组：按用户任务里的功能划分组，组数按需要，不限三种；同功能部件同组同色，不同组颜色明显不同。每个物理部件仍是独立 object。单个简单物体不必分组。",
+    "13. 几何建完后切到 material 链，用一次 blender.material_assign_semantic 为所有组上色并写入语义标签，不要逐个 material_create / material_assign。颜色只是语义标签，不代表父子层级；层级用 object_set_parent 建立。",
+    "14. 上过语义色的模型，调用 blender.render_scene_views 时传 shading=\"semantic\"，让颜色不受灯光影响。验收会同时检查 颜色 → 逻辑 和 三视图 → 结构，语义正确不能弥补结构错误。",
 ].join("\n");
 
 // API 侧会话历史（含 system / assistant 的 tool_calls / 工具结果），与 UI 消息分开维护
@@ -86,6 +97,8 @@ const apiHistory: OpenAI.ChatCompletionMessageParam[] = [
 ];
 // 仅 appendRenderedViews 推入的验收图消息。清旧图时只删这些对象。
 const harnessRenderMessages = new Set<OpenAI.ChatCompletionMessageParam>();
+// 最近一次出图时采集的场景语义数据，JUDGE_ONLY 判定后用它做确定性复核
+let latestSemantic: SemanticSnapshot | null = null;
 
 const MAX_TOOL_ROUNDS = 50;
 const MAX_HARNESS_ITERATIONS = 5;
@@ -143,6 +156,7 @@ function rejectedToolsWithReasoning(err: unknown): boolean {
 function resetApiHistory() {
     apiHistory.splice(1);
     harnessRenderMessages.clear();
+    latestSemantic = null;
     apiHistory[0] = { role: "system", content: SYSTEM_PROMPT };
     console.log("[HARNESS] api history reset", { messages: apiHistory.length });
 }
@@ -217,12 +231,6 @@ async function withRateLimitRetry<T>(signal: AbortSignal, run: () => Promise<T>)
     }
 }
 
-type HarnessVerdict = {
-    pass?: boolean;
-    priority_fixes?: unknown;
-    overall_score?: unknown;
-};
-
 function bytesToBase64(bytes: Uint8Array): string {
     const chunkSize = 0x8000;
     let binary = "";
@@ -237,27 +245,13 @@ async function pngToDataUrl(path: string): Promise<string> {
     return `data:image/png;base64,${bytesToBase64(bytes)}`;
 }
 
-function parseHarnessJson(text: string): HarnessVerdict | null {
-    const trimmed = text.trim();
-    const fence = trimmed.match(/```(?:json)?\s*([\s\S]*?)```/);
-    const raw = fence ? fence[1].trim() : trimmed;
-    const start = raw.indexOf("{");
-    const end = raw.lastIndexOf("}");
-    if (start < 0 || end <= start) return null;
-    try {
-        const obj = JSON.parse(raw.slice(start, end + 1)) as HarnessVerdict;
-        if (typeof obj?.pass === "boolean") return obj;
-    } catch {
-        return null;
-    }
-    return null;
-}
-
 function failFixInstruction(fixes: unknown[]): string {
     return (
         "视觉验收未通过（pass=false）。请只根据下列 priority_fixes 修改当前场景中的现有物体。" +
-        "不要清场、不要 Boolean 合并、不要从零重建。" +
-        "改物体前用 get_toolchain 切到对应链；改完后必须 get_toolchain 切到 render，再调用 blender.render_scene_views 生成 front/right/top。\n" +
+        "不要清场、不要 Boolean 合并、不要从零重建。\n" +
+        "结构问题（形状/位置/连接/比例）用 object、mesh 链修改；缺少的部件要实际创建。" +
+        "语义问题（分组/颜色/标签）切到 material 链，用一次 blender.material_assign_semantic 修正。\n" +
+        "改物体前用 get_toolchain 切到对应链；改完后必须 get_toolchain 切到 render，再调用 blender.render_scene_views 生成 front/right/top（上过语义色时传 shading=\"semantic\"）。\n" +
         JSON.stringify(fixes, null, 2)
     );
 }
@@ -326,45 +320,20 @@ async function appendRenderedViews(toolName: string, result: string, originalUse
 
     dropPreviousRenderedViews();
     console.log("[HARNESS] rendered views attached", { count: imageParts.length, paths });
+
+    // Host 直接查场景语义数据，不占 LLM 轮次；插件旧版或查询失败时语义信号记为不可用
+    latestSemantic = parseSemanticInspect(await execute(SEMANTIC_INSPECT_TOOL, "{}"));
+    console.log("[HARNESS] semantic snapshot", {
+        available: latestSemantic.available,
+        annotated: latestSemantic.annotated,
+        groups: latestSemantic.groups.map((g) => ({ group: g.group, objects: g.objects.length })),
+        issues: latestSemantic.issues.map((i) => i.code),
+        error: latestSemantic.error,
+    });
     const renderMessage: OpenAI.ChatCompletionMessageParam = {
         role: "user",
         content: [
-            {
-                type: "text",
-                text: `你现在是 Blender 建模结果的视觉验收器。
-
-用户最初的建模要求是：
-"${originalUserRequest}"
-
-请根据刚刚生成的 front、right、top 三张正交渲染图，
-判断当前模型是否满足这个要求。
-
-只根据图片中真实可见的内容判断，不要根据文件名、对象名或工具参数猜测。
-
-请严格返回以下 JSON，不要输出 Markdown，不要补充其它文字：
-
-{
-  "pass": true,
-  "overall_score": 0.0,
-  "views": {
-    "front": {"score": 0.0, "issues": []},
-    "right": {"score": 0.0, "issues": []},
-    "top": {"score": 0.0, "issues": []}
-  },
-  "critical_issues": [],
-  "priority_fixes": []
-}
-
-评分范围是 0 到 1。
-
-pass=true 的条件：
-- overall_score >= 0.80
-- 每个视图 score >= 0.70
-- critical_issues 为空
-
-如果模型明显缺少用户要求的主要结构，pass 必须为 false。
-`,
-            },
+            { type: "text", text: buildJudgePrompt(originalUserRequest, latestSemantic) },
             ...imageParts,
         ],
     };
@@ -498,7 +467,25 @@ export async function send() {
                 }
             }
 
-            const verdict = parseHarnessJson(reply.content);
+            const rawVerdict = parseHarnessJson(reply.content);
+            // 只在 JUDGE_ONLY 轮汇总：LLM 的结构/语义判定 + 场景数据上的确定性复核
+            const combined = rawVerdict && judging ? combineVerdict(rawVerdict, latestSemantic) : null;
+            const verdict = combined ?? rawVerdict;
+            if (combined) {
+                console.log("[HARNESS] combined verdict", {
+                    pass: combined.pass,
+                    structural: combined.structural,
+                    semantic: combined.semantic,
+                    critical_issues: combined.critical_issues,
+                    harness: combined.harness,
+                });
+                if (combined.harness.overridden) {
+                    chat.messages.push({
+                        role: "tool",
+                        content: `Harness 复核未通过：${combined.harness.deterministic_issues.join("；") || "结构或语义维度判定为失败"}`,
+                    });
+                }
+            }
             if (verdict?.pass === true) {
                 console.log("[HARNESS] judge result", {
                     pass: true,
