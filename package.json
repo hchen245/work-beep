@@ -8,6 +8,7 @@
     "build": "vue-tsc --noEmit && vite build",
     "preview": "vite preview",
     "tauri": "tauri",
+    "test": "node --test \"tests/**/*.test.ts\"",
     "dist:host": "node scripts/dist-host.mjs"
   },
   "dependencies": {
